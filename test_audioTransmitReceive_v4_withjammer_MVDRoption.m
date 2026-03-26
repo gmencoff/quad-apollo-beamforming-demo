@@ -1,34 +1,62 @@
-%% Framed FM Streaming with MUSIC DOA + MVDR (preamble + payload only)
-% + Parallel non‑MVDR (sum) baseline
-% + LIVE: Beampattern + continuously growing spectrograms (time-throttled)
-clear; close all; clc;
+clear all
+close all 
 
 %% -----------------------------------------------------------------------
-% Device / RF setup
+% AUDIO INPUT (SIMPLE: Default microphone or WAV)
 % ------------------------------------------------------------------------
-x = Triton('ip:192.168.2.1');
-x.initialize;
-nChan = 16;
+choice = questdlg( ...
+    'Select audio source for FM transmission', ...
+    'Audio Source', ...
+    'Record from microphone', 'Use guitartune.wav', ...
+    'Record from microphone');
 
-fc = 10e9;                                    % single source of truth
-x.setTxNCOFreq('Main', fc * ones(1,nChan));
-x.setRxNCOFreq('Main', -2.8e9 * ones(1,nChan));
+if strcmp(choice,'Record from microphone')
 
-cw = x.createWaveform('cw', -1, x.basebandFreq);
-frameLen = size(cw,1);
-fprintf('Device waveform length = %d samples\n', frameLen);
+    % ---- Recording parameters
+    FsAudio = 44100;   % Hz
+    nBits   = 16;
+    nChan   = 1;       % mono
+    recTime = 10;      % seconds
+    wavName = 'user_recorded_input.wav';
+
+    % ---- Inform user
+    uiwait(msgbox( ...
+        'Recording from DEFAULT system microphone for 10 seconds.', ...
+        'Audio Recording','modal'));
+
+    % ---- Record using default mic
+    recObj = audiorecorder(FsAudio, nBits, nChan);
+
+    disp('*** RECORDING ***');
+    recordblocking(recObj, recTime);
+    disp('*** DONE ***');
+
+    % ---- Fetch, normalize, save
+    y = getaudiodata(recObj);
+    y = y(:);
+    y = y / max(abs(y) + 1e-12);
+
+    audiowrite(wavName, y, FsAudio);
+    fprintf('Saved microphone recording to %s\n', wavName);
+
+else
+    % ---- Use existing WAV file
+    [y, FsAudio] = audioread('guitartune.wav');
+    y = mean(y,2);                 % force mono
+    y = y(:) / max(abs(y)+1e-12);  % normalize
+end
+
 
 %% -----------------------------------------------------------------------
 % Audio + FM mod/demod
 % ------------------------------------------------------------------------
-[y, FsAudio] = audioread('guitartune.wav');
-y = mean(y,2);  y = y(:) / max(abs(y)+1e-12);
-
-bbFs = 400e6;                 % *** set to your actual Rx baseband Fs if different ***
+bbFs = 400e6;                 % set to your actual Rx baseband Fs
 fDev  = bbFs/3;
 
-modulator   = comm.FMModulator(  'SampleRate', bbFs, 'FrequencyDeviation', fDev);
-demodulator = comm.FMDemodulator('SampleRate', bbFs, 'FrequencyDeviation', fDev);
+modulator   = comm.FMModulator(  ...
+    'SampleRate', bbFs, 'FrequencyDeviation', fDev);
+demodulator = comm.FMDemodulator( ...
+    'SampleRate', bbFs, 'FrequencyDeviation', fDev);
 
 txFM = modulator(y);
 txFM = txFM(:);
@@ -41,23 +69,24 @@ spacing  = freq2wavelen(fc)/2;
 ura      = phased.URA(Size=uraSize, ElementSpacing=[spacing spacing]);
 
 %% -----------------------------------------------------------------------
-% Calibration: collapse to static per‑element vector for MVDR/MUSIC
+% Calibration
 % ------------------------------------------------------------------------
 x.txWaveform(cw,1);
 calData    = x.rx();
 calweights = sourceCalibration(calData,[0;0],ura,fc,1);
-calvec = median(calweights, 2);
+calvec = median(calweights,2);
 calvec = calvec / calvec(1);
 
 %% -----------------------------------------------------------------------
-% MUSIC & MVDR System objects
+% MUSIC & MVDR objects
 % ------------------------------------------------------------------------
 azScan = -90:90; elScan = -90:90;
 
 music1 = phased.MUSICEstimator2D( ...
     SensorArray=ura, OperatingFrequency=fc, ...
     AzimuthScanAngles=azScan, ElevationScanAngles=elScan, ...
-    NumSignalsSource="Property", NumSignals=1, DOAOutputPort=true);
+    NumSignalsSource="Property", NumSignals=1, ...
+    DOAOutputPort=true);
 
 mvdr = phased.MVDRBeamformer( ...
     SensorArray=ura, OperatingFrequency=fc, ...
@@ -378,8 +407,8 @@ subplot(2,1,1); spectrogram(rxAudio,    specWin, specOverlap, specNFFT, FsAudio,
 subplot(2,1,2); spectrogram(rxAudio_noBF,specWin, specOverlap, specNFFT, FsAudio, 'yaxis'); title('No BF (sum) (final)');
 
 save(strcat('framed_fm_music_mvdr_vs_noBF_liveGrowing_', string(datetime('today'))));
-audiowrite('guitartune_received_music_mvdr.wav',   rxAudio,     FsAudio);
-audiowrite('guitartune_received_noBF.wav',         rxAudio_noBF, FsAudio);
+audiowrite('received_music_mvdr.wav',   rxAudio,     FsAudio);
+audiowrite('received_noBF.wav',         rxAudio_noBF, FsAudio);
 
 %% =====================================================================
 % Helper functions (must be at the end of the script)
